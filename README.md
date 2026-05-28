@@ -24,6 +24,8 @@ Then point the agent at the batch. The agent's instructions in `CLAUDE.md` descr
 
 A worked example lives in `examples/sample-batch/` — synthetic typed-essay submissions plus the brief and rubric used to mark them. Use this as a quick check before pointing the agent at real student work.
 
+For a flow chart of the full workflow, see [`docs/workflow.md`](docs/workflow.md).
+
 ## What the agent produces
 
 For each batch, the agent writes plain-text output files that teachers can open in any editor (Notes, Word, email — no markdown rendering required):
@@ -62,7 +64,8 @@ writing-marker/
 ├── docs/
 │   ├── architecture.md                # How the workflow and skills fit together
 │   ├── field-guide.md                 # Known issues, lessons learned, edge cases
-│   └── scaling-large-batches.md       # How the agent handles big batches in parallel
+│   ├── scaling-large-batches.md       # How the agent handles big batches in parallel
+│   └── workflow.md                    # Flow chart of the five stages
 └── private/                           # Real student data goes here (gitignored)
 ```
 
