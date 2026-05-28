@@ -1,6 +1,8 @@
 # Architecture — Workflow and Skill Contracts
 
-This document defines the stages of the writing-marker workflow, the input/output of each stage, and which skill is invoked where. Skills are built against the contracts on this page; the orchestrator (`CLAUDE.md`) is built to wire them together.
+This document defines the stages of the writing-marker workflow, the input/output of each stage, and which skill is invoked where. Skills are built against the contracts on this page; the orchestrator (`CLAUDE.md`) is built to wire them together by dispatching subagents.
+
+**The orchestrator never reads student work, transcriptions, or full marker files directly.** Every content-touching stage is run by a subagent the orchestrator dispatches. See `docs/subagent-architecture.md` for the full pattern.
 
 If you are adding or modifying a skill, update this document first so the contract is explicit before the skill is implemented.
 
@@ -34,21 +36,23 @@ If any of these checks fail, stop and ask the teacher.
 
 ---
 
-## Stage 2 — Per-student marking
+## Stage 2 — Per-student marking (subagent-delegated)
 
-For each student, in a stable order:
+**Dispatched by:** the orchestrator, as one or more parallel marking subagents. The orchestrator does not run this stage in its own context. Partition sizing in `docs/subagent-architecture.md`.
+
+Each marking subagent, for each student in its partition:
 
 ### 2a. Transcription (if handwritten)
 
-**Skill:** `reading-handwritten-work`
+**Skill:** `reading-handwritten-work` (invoked by the marking subagent).
 **Input:** one or more image files belonging to a single student, plus the task brief (so it knows what to skip — e.g. printed rubrics, prompts).
-**Output:** a *transcription block* — verbatim text with `[illegible]` markers where appropriate, plus a *transcription confidence note* flagging anything the orchestrator needs to know (page-order suspicion, mismatched-student suspicion, image-quality issues, large illegible runs).
+**Output:** a *transcription block* — verbatim text with `[illegible]` markers where appropriate, plus a *transcription confidence note* flagging anything the subagent needs to know (page-order suspicion, mismatched-student suspicion, image-quality issues, large illegible runs).
 
 If the input is already text, this skill is skipped.
 
 ### 2b. Scoring against the rubric
 
-**No skill invoked.** The orchestrator does this directly with the rubric file in context.
+**No skill invoked.** The marking subagent does this directly with the rubric file in context.
 
 **Input:** the transcription, the rubric, the task brief.
 **Output:** a per-criterion score, plus required-element presence/absence, plus an overall band synthesised from the criterion scores (following the rubric's synthesis rules and grade-ceiling behavior).
@@ -57,17 +61,21 @@ This stage applies the marking discipline rules from `CLAUDE.md`: quote evidence
 
 ### 2c. Per-student marker file
 
-**No skill invoked.** Orchestrator writes the file directly.
+**No skill invoked.** The marking subagent writes the file directly.
 
 **Output file:** `private/{batch}/{student}.txt` (in real runs) or `examples/sample-batch/results/{student}.txt` (in test runs). Plain text, no markdown — teachers read these in Notes, Word, or email. Format follows the per-student marker file shape below.
 
-**Parallelization:** when a batch has more than ~25 students, Stage 2 is fanned out across parallel subagents. See `docs/scaling-large-batches.md` for the pattern. Stages 3 and 4 remain serial — they require the full batch as input.
+### Subagent return
+
+Each marking subagent returns a one-line summary per student to the orchestrator: `{name} {band} ({label})`. It flags any student it could not mark. The orchestrator collates these summaries; the full marker files stay on disk and are read in Stages 3 and 4 by a different subagent.
 
 ---
 
-## Stage 3 — Batch calibration
+## Stage 3 — Batch calibration (subagent-delegated)
 
-**Skill:** `calibrating-a-batch`
+**Dispatched by:** the orchestrator, as one calibration subagent. The orchestrator does not load the marker files into its own context.
+
+**Skill:** `calibrating-a-batch` (invoked by the calibration subagent).
 **Input:** all per-student marker files from Stage 2, the rubric, the task brief.
 **Skip condition:** if the batch has fewer than 6 students. Cross-student calibration requires enough students to detect patterns; with 4–5 marker files there isn't enough signal. The orchestrator notes the skip in the Stage 4 synthesis.
 **Output:** a *calibration report* (`{batch}-calibration.txt`) flagging:
@@ -76,13 +84,17 @@ This stage applies the marking discipline rules from `CLAUDE.md`: quote evidence
 - The same issue weighted differently across students.
 - Suggested band adjustments (always as recommendations, not silent rewrites).
 
-The orchestrator may revise marker files based on this report, but only after surfacing the changes to the teacher.
+### Subagent return
+
+The calibration subagent saves the report to disk and returns a one-paragraph verdict to the orchestrator. The orchestrator may revise marker files based on this report, but only after surfacing the changes to the teacher.
 
 ---
 
-## Stage 4 — Batch synthesis
+## Stage 4 — Batch synthesis (subagent-delegated)
 
-**Skill:** `synthesizing-batch-issues`
+**Dispatched by:** the orchestrator, as one synthesis subagent. The orchestrator does not load the marker files into its own context.
+
+**Skill:** `synthesizing-batch-issues` (invoked by the synthesis subagent).
 **Input:** all per-student marker files, the task brief, the batch size (so the skill can adapt thresholds).
 **Output:** a *teaching priorities document* (`{batch}-synthesis.txt`) with:
 - Patterns appearing in 4+ students (or 2+ when batch size is under 10), with counts and quoted examples.
@@ -90,17 +102,25 @@ The orchestrator may revise marker files based on this report, but only after su
 - Strengths to protect.
 - A ranked teaching punch-list for the next 2–3 lessons.
 
+### Subagent return
+
+The synthesis subagent saves the document to disk and returns the ranked punch-list to the orchestrator.
+
 ---
 
-## Stage 5 — Student-facing conversion (optional)
+## Stage 5 — Student-facing conversion (subagent-delegated, optional)
 
-Only runs if the teacher asks for it. The teacher may also configure the language level (default: B1).
+Only runs if the teacher asks for it. **Dispatched by:** the orchestrator, as one subagent per marker file, all dispatched in parallel.
 
-**Skill:** `writing-student-facing-feedback`
-**Input:** one per-student marker file (TXT), the configured target language level.
+**Skill:** `writing-student-facing-feedback` (invoked by each student-facing subagent).
+**Input:** one per-student marker file (TXT), the configured target language level (default: B1).
 **Output:** a student-facing plain-text file at `private/{batch}/student-versions/{student}.txt`.
 
 Rules baked into the skill: no peer comparisons, WWW/EBI structure, max 2–3 EBI bullets, no rubric jargon, configured language level, student's quoted work preserved verbatim.
+
+### Subagent return
+
+Each subagent returns a one-line confirmation to the orchestrator. The student-facing files are on disk.
 
 ---
 
@@ -231,12 +251,13 @@ TEACHING PUNCH-LIST — NEXT 2–3 LESSONS
 
 ## Decisions baked into this architecture
 
-1. **The orchestrator owns the rubric application.** Scoring is not a skill because it requires holding the full rubric, the task brief, and the transcription in context together. Splitting it out would force passing too much state.
-2. **Transcription and student-facing conversion are skills** because they are self-contained, independently invokable, and encode discipline that is easy to break.
-3. **Calibration and synthesis are skills** because they operate on the batch as a whole, take all marker files as input, and produce one report each.
-4. **The four skills do not call each other.** They are all invoked by the orchestrator.
-5. **Grade-ceiling logic lives in the rubric, not the orchestrator.** Different rubrics may set different grade-ceiling bands. The orchestrator reads the band from the rubric metadata.
-6. **All real student data lives in `private/`.** Skills and the orchestrator never write to anywhere else when running on real batches. The `examples/` folder is for synthetic test fixtures only.
+1. **The orchestrator never reads student work, transcriptions, or full marker files.** Every content-touching stage is delegated to a subagent. The orchestrator's context holds the rubric, the brief, teacher preferences, and the *reports* coming back. See `docs/subagent-architecture.md` for the rationale.
+2. **The marking subagent owns the rubric application.** Scoring is not a separate skill because it requires holding the full rubric, the task brief, and the transcription in context together. Splitting it out would force passing too much state.
+3. **Transcription and student-facing conversion are skills** because they are self-contained, independently invokable, and encode discipline that is easy to break. They are invoked by subagents, not by the orchestrator.
+4. **Calibration and synthesis are skills** because they operate on the batch as a whole, take all marker files as input, and produce one report each. They are invoked by subagents the orchestrator dispatches.
+5. **The four skills do not call each other.** They are all invoked by subagents the orchestrator dispatches.
+6. **Grade-ceiling logic lives in the rubric, not the orchestrator.** Different rubrics may set different grade-ceiling bands. The marking subagent reads the band from the rubric metadata.
+7. **All real student data lives in `private/`.** Subagents and the orchestrator never write to anywhere else when running on real batches. The `examples/` folder is for synthetic test fixtures only.
 
 ---
 

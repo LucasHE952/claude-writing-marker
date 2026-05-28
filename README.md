@@ -37,9 +37,11 @@ For each batch, the agent writes plain-text output files that teachers can open 
 
 The marker files, calibration, and synthesis are output as `.txt` because the people who read them are teachers, not engineers. The agent's own configuration (`CLAUDE.md`, skills, rubrics, task briefs) stays in markdown because the AI reads those.
 
-## Handling large batches
+## How the agent stays consistent
 
-For batches above ~25 students, the agent splits the work across several parallel passes to keep marking consistent from the first student to the last. See `docs/scaling-large-batches.md` for how this works.
+The agent uses an orchestrator-plus-subagents pattern. The orchestrator never reads student work directly — it dispatches subagents to mark, calibrate, synthesise, and (optionally) generate student-facing feedback. Each subagent runs in a fresh context.
+
+This matters most for calibration: a marker that has just spent its context window marking 20 students will calibrate worse than a fresh subagent that reads only the resulting marker files. The pattern is the same regardless of batch size — small batches and large batches both use subagents; large batches just use more of them in parallel. See `docs/subagent-architecture.md` for the details.
 
 ## Repo layout
 
@@ -62,10 +64,10 @@ writing-marker/
 │   ├── script-brief/                  # Example task brief (script writing)
 │   └── opinion-article-brief/         # Example task brief (opinion article)
 ├── docs/
-│   ├── architecture.md                # How the workflow and skills fit together
-│   ├── field-guide.md                 # Known issues, lessons learned, edge cases
-│   ├── scaling-large-batches.md       # How the agent handles big batches in parallel
-│   └── workflow.md                    # Flow chart of the five stages
+│   ├── architecture.md                # Workflow and skill contracts
+│   ├── subagent-architecture.md       # Why and how the orchestrator delegates everything to subagents
+│   ├── workflow.md                    # Flow chart of the five stages
+│   └── field-guide.md                 # Known issues, lessons learned, edge cases
 └── private/                           # Real student data goes here (gitignored)
 ```
 

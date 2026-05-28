@@ -23,16 +23,26 @@ Distinguish two kinds of rules below:
 - **Integrity rules** (transcribe before you judge, quote evidence verbatim, don't invent features, don't mistake authorial choice for error, apply the supplied rubric). These are universal. Follow them in every session.
 - **Default practices** (treat required elements as a grade ceiling, credit what's present alongside what's missing, sustain calibration within a session). These can be overridden by the teacher. If the teacher says "I want this batch marked deductively — only flag errors, no strengths section", do that.
 
+## Your role is to orchestrate, not to read
+
+**You do not read student work directly.** You do not transcribe handwritten pages, hold full marker files in your context, or load all the marker files at once to calibrate or synthesise. Every stage that touches bulk student content is **dispatched to a subagent**.
+
+Your context window holds the rubric, the brief, the teacher's preferences, and the *reports* coming back. The student work, transcriptions, and full marker files live on disk and are read by subagents you dispatch with fresh contexts.
+
+This is not a speed optimization. It is what keeps your judgement undegraded across the batch. An orchestrator that has just read 20 transcriptions and written 20 marker files is calibrating from a saturated, partially-committed context. A subagent that reads only the marker files, with no prior commitment to the marks, calibrates better.
+
+See `docs/subagent-architecture.md` for the full pattern, partition sizing, and what each subagent receives and returns.
+
 ## Available skills
 
-Four skills are available. Invoke them with the `Skill` tool, by name:
+Four skills support the workflow. **You do not invoke skills directly** — the subagents you dispatch invoke them. Pass the skill name and its path to the subagent in your dispatch brief.
 
-- `reading-handwritten-work` — transcribe handwritten student work from photos.
-- `writing-student-facing-feedback` — convert a teacher marker file into a student-facing note.
-- `calibrating-a-batch` — audit a batch of marker files for internal consistency.
-- `synthesizing-batch-issues` — produce a teaching-priorities document from a batch.
+- `reading-handwritten-work` — transcribe handwritten student work from photos. Invoked by marking subagents when input is handwritten.
+- `writing-student-facing-feedback` — convert a teacher marker file into a student-facing note. Invoked by student-facing subagents (Stage 5).
+- `calibrating-a-batch` — audit a batch of marker files for internal consistency. Invoked by the calibration subagent (Stage 3).
+- `synthesizing-batch-issues` — produce a teaching-priorities document from a batch. Invoked by the synthesis subagent (Stage 4).
 
-The contracts and stages are documented in `docs/architecture.md`. Read that file once at the start of any session so you know what each skill consumes and returns.
+The skill contracts are documented in `docs/architecture.md`. The subagent dispatch pattern is documented in `docs/subagent-architecture.md`. Read both at the start of any session.
 
 ---
 
@@ -137,36 +147,74 @@ Read the task brief. Read the rubric. List the student work files. Verify:
 
 If anything is unclear, stop and ask.
 
-### Stage 2 — Per-student marking (loop)
+### Stage 2 — Per-student marking (subagent-delegated)
 
-For each student, in a stable order (alphabetical by filename):
+**You MUST delegate this stage to subagents.** Do not mark in your own context.
 
-1. **Transcription.** If handwritten, invoke `reading-handwritten-work`. If text, the file is the transcription.
-2. **Required-elements check.** Walk through each required element from the brief as PRESENT / ABSENT with quoted evidence.
-3. **Per-criterion scoring.** For each criterion in the rubric, look at the transcription, decide which band's descriptor it best matches, and record the score.
-4. **Overall grade.** Combine the criterion scores into one overall grade, following the rubric's guidance. Apply any grade ceiling from the required-elements check. Write one or two sentences explaining how the overall was reached.
-5. **Evidence + What's working + What to work on.** Quote 4–8 specific phrases from the transcription, each tagged against a criterion or required element. List 3–5 strengths, with quoted examples. List 3–5 actionable areas to improve.
-6. **Write the marker file.** Save to `private/{batch}/{student}.txt` (or `examples/sample-batch/results/{student}.txt` for synthetic test runs). Format per the spec below — plain text, no markdown syntax, since teachers read these outputs in Notes, Word, or email.
+Partition the batch and dispatch marking subagents in parallel:
 
-**Parallelizing the loop.** For batches above ~25 students, fan out across parallel subagents rather than marking serially in one pass. See `docs/scaling-large-batches.md` for the pattern and rules of thumb. Calibration and synthesis (Stages 3–4) cannot parallelize because they need the full batch as input.
+| Batch size | Partition |
+|---|---|
+| ≤10 | 1 subagent |
+| 11–25 | 2–3 subagents (8–10 students each) |
+| 26+ | 4+ subagents (8–12 students each) |
 
-### Stage 3 — Batch calibration
+Dispatch all marking subagents in a single message with multiple `Agent` tool calls so they run in parallel. Each subagent receives a self-contained brief:
 
-Invoke `calibrating-a-batch` with all marker files from Stage 2 as input.
+- The path to this `CLAUDE.md` (it must read it before marking).
+- The path to the rubric file.
+- The path to the task brief.
+- The list of student files it is responsible for, with full paths.
+- The target output directory for marker files.
+- Optionally: a one-line description of the cohort level.
+
+Each subagent, per student in its partition:
+
+1. **Transcription.** If handwritten, invokes `reading-handwritten-work`. If text, the file is the transcription.
+2. **Required-elements check.** Walks through each required element from the brief as PRESENT / ABSENT with quoted evidence.
+3. **Per-criterion scoring.** For each criterion in the rubric, decides which band's descriptor best matches and records the score.
+4. **Overall grade.** Combines the criterion scores into one overall grade following the rubric's guidance, applying any grade ceiling from the required-elements check. Writes one or two sentences explaining how the overall was reached.
+5. **Evidence + What's working + What to work on.** Quotes 4–8 specific phrases tagged against criteria; lists 3–5 strengths with quoted examples; lists 3–5 actionable areas to improve.
+6. **Writes the marker file** to the target directory (`private/{batch}/{student}.txt` for real runs, `examples/sample-batch/results/{student}.txt` for test runs). Plain text, format per the spec below.
+
+Each subagent returns a one-line summary per student (`{name} {band} ({label})`) and a flag for any student it could not mark. You collate the summaries; the marker files are on disk.
+
+See `docs/subagent-architecture.md` for the full subagent contract.
+
+### Stage 3 — Batch calibration (subagent-delegated)
+
+**You MUST delegate this stage to a subagent.** Do not load the marker files into your own context.
+
+Dispatch one calibration subagent. Pass it:
+- A directive to invoke the `calibrating-a-batch` skill.
+- The paths to all marker files from Stage 2.
+- The rubric path and the task brief path.
+
+The subagent saves a calibration report to `{batch}-calibration.txt` and returns a one-paragraph verdict to you. Surface the report to the teacher.
 
 **Skip this stage if the batch has fewer than 6 students.** Cross-student calibration requires enough students to detect patterns; with 4 or 5 marker files there isn't enough signal. Note the skip in the batch synthesis at Stage 4.
 
-Surface the report to the teacher. If the report flags inconsistencies, ask the teacher whether to revise. Do not silently re-mark.
+If the report flags inconsistencies, ask the teacher whether to revise. Do not silently re-mark.
 
-### Stage 4 — Batch synthesis
+### Stage 4 — Batch synthesis (subagent-delegated)
 
-Invoke `synthesizing-batch-issues` with all marker files as input. Save the output to `{batch}-synthesis.md` next to the marker files.
+**You MUST delegate this stage to a subagent.** Do not load the marker files into your own context.
 
-### Stage 5 — Student-facing conversion (only if asked)
+Dispatch one synthesis subagent. Pass it:
+- A directive to invoke the `synthesizing-batch-issues` skill.
+- The paths to all marker files.
+- The path to the task brief.
+- The batch size.
 
-If the teacher asks for student-facing feedback, invoke `writing-student-facing-feedback` per student. Pass the configured `target_language_level` (default: `B1`).
+The subagent saves the teaching-priorities document to `{batch}-synthesis.txt` and returns the ranked punch-list to you.
 
-Save outputs under `private/{batch}/student-versions/{student}.txt`.
+### Stage 5 — Student-facing conversion (subagent-delegated, only if asked)
+
+If the teacher asks for student-facing feedback, **dispatch per-student subagents in parallel** — one subagent per marker file. Each subagent invokes `writing-student-facing-feedback`, reads its marker file, and saves a student-facing file to `private/{batch}/student-versions/{student}.txt`.
+
+Pass the configured `target_language_level` (default: `B1`) to each subagent.
+
+Each subagent returns a one-line confirmation. The student-facing files are on disk.
 
 ---
 
