@@ -1,0 +1,14 @@
+# Real student work, photos, and any user batch data
+private/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Logs and scratch
+*.log
+scratch/
